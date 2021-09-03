@@ -899,7 +899,8 @@ NO_INLINE IColumn::Filter joinRightColumns(
     const Map & map,
     AddedColumns & added_columns,
     const ConstNullMapPtr & null_map [[maybe_unused]],
-    JoinStuff::JoinUsedFlags & used_flags [[maybe_unused]])
+    JoinStuff::JoinUsedFlags & used_flags [[maybe_unused]],
+    size_t max_joined_right_rows)
 {
     constexpr bool is_any_join = STRICTNESS == ASTTableJoin::Strictness::Any;
     constexpr bool is_all_join = STRICTNESS == ASTTableJoin::Strictness::All;
@@ -927,12 +928,24 @@ NO_INLINE IColumn::Filter joinRightColumns(
 
     IColumn::Offset current_offset = 0;
 
+    uint64_t joined_rows = 0;
+    auto add_and_check_limit = [&joined_rows, max_joined_right_rows](uint64_t add)
+    {
+        if (max_joined_right_rows > 0)
+        {
+            joined_rows += add;
+            if (joined_rows > max_joined_right_rows)
+                throw Exception("Exceed the limit that maximum rows of right table that can be joined in a left table block", ErrorCodes::SET_SIZE_LIMIT_EXCEEDED);
+        }
+    };
+
     for (size_t i = 0; i < rows; ++i)
     {
         if constexpr (has_null_map)
         {
             if ((*null_map)[i])
             {
+                add_and_check_limit(1);
                 addNotFoundRow<add_missing, need_replication>(added_columns, current_offset);
 
                 if constexpr (need_replication)
@@ -951,6 +964,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
 
             if constexpr (is_asof_join)
             {
+                add_and_check_limit(1);
                 TypeIndex asof_type = added_columns.asofType();
                 ASOF::Inequality asof_inequality = added_columns.asofInequality();
                 const IColumn & left_asof_key = added_columns.leftAsofKey();
@@ -966,6 +980,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
             }
             else if constexpr (is_all_join)
             {
+                add_and_check_limit(mapped.getSize());
                 setUsed<need_filter>(filter, i);
                 used_flags.template setUsed<need_flags>(find_result.getOffset());
                 addFoundRowAll<Map, add_missing>(mapped, added_columns, current_offset);
@@ -977,6 +992,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
 
                 if (used_once)
                 {
+                    add_and_check_limit(mapped.getSize());
                     setUsed<need_filter>(filter, i);
                     addFoundRowAll<Map, add_missing>(mapped, added_columns, current_offset);
                 }
@@ -988,6 +1004,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                 /// Use first appeared left key only
                 if (used_once)
                 {
+                    add_and_check_limit(1);
                     setUsed<need_filter>(filter, i);
                     added_columns.appendFromBlock<add_missing>(*mapped.block, mapped.row_num);
                 }
@@ -1003,6 +1020,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
             }
             else /// ANY LEFT, SEMI LEFT, old ANY (RightAny)
             {
+                add_and_check_limit(1);
                 setUsed<need_filter>(filter, i);
                 used_flags.template setUsed<need_flags>(find_result.getOffset());
                 added_columns.appendFromBlock<add_missing>(*mapped.block, mapped.row_num);
@@ -1029,25 +1047,26 @@ IColumn::Filter joinRightColumnsSwitchNullability(
         const Map & map,
         AddedColumns & added_columns,
         const ConstNullMapPtr & null_map,
-        JoinStuff::JoinUsedFlags & used_flags)
+        JoinStuff::JoinUsedFlags & used_flags,
+        size_t max_joined_right_rows)
 {
     if (added_columns.need_filter)
     {
         if (null_map)
             return joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, true, true>(
-                    std::forward<KeyGetter>(key_getter), map, added_columns, null_map, used_flags);
+                    std::forward<KeyGetter>(key_getter), map, added_columns, null_map, used_flags, max_joined_right_rows);
         else
             return joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, true, false>(
-                    std::forward<KeyGetter>(key_getter), map, added_columns, nullptr, used_flags);
+                    std::forward<KeyGetter>(key_getter), map, added_columns, nullptr, used_flags, max_joined_right_rows);
     }
     else
     {
         if (null_map)
             return joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, false, true>(
-                    std::forward<KeyGetter>(key_getter), map, added_columns, null_map, used_flags);
+                    std::forward<KeyGetter>(key_getter), map, added_columns, null_map, used_flags, max_joined_right_rows);
         else
             return joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, false, false>(
-                    std::forward<KeyGetter>(key_getter), map, added_columns, nullptr, used_flags);
+                    std::forward<KeyGetter>(key_getter), map, added_columns, nullptr, used_flags, max_joined_right_rows);
     }
 }
 
@@ -1057,7 +1076,8 @@ IColumn::Filter switchJoinRightColumns(
     AddedColumns & added_columns,
     HashJoin::Type type,
     const ConstNullMapPtr & null_map,
-    JoinStuff::JoinUsedFlags & used_flags)
+    JoinStuff::JoinUsedFlags & used_flags,
+    size_t max_joined_right_rows)
 {
     constexpr bool is_asof_join = STRICTNESS == ASTTableJoin::Strictness::Asof;
     switch (type)
@@ -1068,7 +1088,7 @@ IColumn::Filter switchJoinRightColumns(
             using KeyGetter = typename KeyGetterForType<HashJoin::Type::TYPE, const std::remove_reference_t<decltype(*maps_.TYPE)>>::Type; \
             auto key_getter = createKeyGetter<KeyGetter, is_asof_join>(added_columns.key_columns, added_columns.key_sizes); \
             return joinRightColumnsSwitchNullability<KIND, STRICTNESS, KeyGetter>( \
-                std::move(key_getter), *maps_.TYPE, added_columns, null_map, used_flags); \
+                std::move(key_getter), *maps_.TYPE, added_columns, null_map, used_flags, max_joined_right_rows); \
         }
         APPLY_FOR_JOIN_VARIANTS(M)
     #undef M
@@ -1079,7 +1099,8 @@ IColumn::Filter switchJoinRightColumns(
 }
 
 template <ASTTableJoin::Kind KIND, ASTTableJoin::Strictness STRICTNESS>
-IColumn::Filter dictionaryJoinRightColumns(const TableJoin & table_join, AddedColumns & added_columns, const ConstNullMapPtr & null_map)
+IColumn::Filter dictionaryJoinRightColumns(const TableJoin & table_join, AddedColumns & added_columns,
+                                           const ConstNullMapPtr & null_map, size_t max_joined_right_rows [[maybe_unused]])
 {
     if constexpr (KIND == ASTTableJoin::Kind::Left &&
         (STRICTNESS == ASTTableJoin::Strictness::Any ||
@@ -1091,7 +1112,7 @@ IColumn::Filter dictionaryJoinRightColumns(const TableJoin & table_join, AddedCo
         JoinStuff::JoinUsedFlags flags;
         KeyGetterForDict key_getter(table_join, added_columns.key_columns);
         return joinRightColumnsSwitchNullability<KIND, STRICTNESS, KeyGetterForDict>(
-                std::move(key_getter), nullptr, added_columns, null_map, flags);
+                std::move(key_getter), nullptr, added_columns, null_map, flags, max_joined_right_rows);
     }
 
     throw Exception("Logical error: wrong JOIN combination", ErrorCodes::LOGICAL_ERROR);
@@ -1168,8 +1189,8 @@ void HashJoin::joinBlockImpl(
     added_columns.need_filter = need_filter || has_required_right_keys;
 
     IColumn::Filter row_filter = overDictionary() ?
-        dictionaryJoinRightColumns<KIND, STRICTNESS>(*table_join, added_columns, null_map) :
-        switchJoinRightColumns<KIND, STRICTNESS>(maps_, added_columns, data->type, null_map, used_flags);
+        dictionaryJoinRightColumns<KIND, STRICTNESS>(*table_join, added_columns, null_map, table_join->maxJoinedRightRowsInOneLeftBlock()) :
+        switchJoinRightColumns<KIND, STRICTNESS>(maps_, added_columns, data->type, null_map, used_flags, table_join->maxJoinedRightRowsInOneLeftBlock());
 
     for (size_t i = 0; i < added_columns.size(); ++i)
         block.insert(added_columns.moveColumn(i));

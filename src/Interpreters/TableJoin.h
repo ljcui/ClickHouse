@@ -70,6 +70,7 @@ private:
     const size_t partial_merge_join_left_table_buffer_bytes = 0;
     const size_t max_files_to_merge = 0;
     const String temporary_files_codec = "LZ4";
+    const size_t max_joined_right_rows_in_one_left_block = 0;
 
     Names key_names_left;
     Names key_names_right; /// Duplicating names are qualified.
@@ -151,6 +152,7 @@ public:
     size_t maxRowsInRightBlock() const { return partial_merge_join_rows_in_right_blocks; }
     size_t maxBytesInLeftBuffer() const { return partial_merge_join_left_table_buffer_bytes; }
     size_t maxFilesToMerge() const { return max_files_to_merge; }
+    size_t maxJoinedRightRowsInOneLeftBlock() const { return max_joined_right_rows_in_one_left_block; }
     const String & temporaryFilesCodec() const { return temporary_files_codec; }
     bool enablePartialMergeJoinOptimizations() const { return partial_merge_join_optimizations; }
     bool needStreamWithNonJoinedRows() const;

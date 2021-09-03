@@ -119,10 +119,13 @@ struct RowRefList : RowRef
             *next = Batch(nullptr);
         }
         next = next->insert(std::move(row_ref), pool);
+        size++;
     }
+    uint64_t getSize() const { return size; }
 
 private:
     Batch * next = nullptr;
+    uint64_t size = 0;
 };
 
 /**
